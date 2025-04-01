@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <sstream>
-
+#include <chrono>
 
 using namespace std;
 
@@ -134,9 +134,17 @@ int main(){
     // ----- Time stepping parameters -----
     const int nSteps = 2000;
 
+    auto begin_timer = std::chrono::high_resolution_clock::now();
+
+    // ----- Mapping data to the GPU -----
+    #pragma omp target data map(rho[0:total_size], rhou[0:total_size], rhov[0:total_size], E[0:total_size], solid[0:total_size]) \
+                             map(alloc:rho_new[0:total_size], rhou_new[0:total_size], rhov_new[0:total_size], E_new[0:total_size])
+
     // ----- Main time-stepping loop -----
     for (int n = 0; n < nSteps; n++){
         // --- Apply boundary conditions on ghost cells ---
+
+        #pragma omp target teams distribute parallel for
         // Left boundary (inflow): fixed free-stream state
         for (int j = 0; j < Ny+2; j++){
             rho[0*(Ny+2)+j] = rho0;
@@ -144,6 +152,8 @@ int main(){
             rhov[0*(Ny+2)+j] = rho0*v0;
             E[0*(Ny+2)+j] = E0;
         }
+
+        #pragma omp target teams distribute parallel for
         // Right boundary (outflow): copy from the interior
         for (int j = 0; j < Ny+2; j++){
             rho[(Nx+1)*(Ny+2)+j] = rho[Nx*(Ny+2)+j];
@@ -151,6 +161,8 @@ int main(){
             rhov[(Nx+1)*(Ny+2)+j] = rhov[Nx*(Ny+2)+j];
             E[(Nx+1)*(Ny+2)+j] = E[Nx*(Ny+2)+j];
         }
+
+        #pragma omp target teams distribute parallel for
         // Bottom boundary: reflective
         for (int i = 0; i < Nx+2; i++){
             rho[i*(Ny+2)+0] = rho[i*(Ny+2)+1];
@@ -158,6 +170,8 @@ int main(){
             rhov[i*(Ny+2)+0] = -rhov[i*(Ny+2)+1];
             E[i*(Ny+2)+0] = E[i*(Ny+2)+1];
         }
+
+        #pragma omp target teams distribute parallel for
         // Top boundary: reflective
         for (int i = 0; i < Nx+2; i++){
             rho[i*(Ny+2)+(Ny+1)] = rho[i*(Ny+2)+Ny];
@@ -167,6 +181,7 @@ int main(){
         }
 
         // --- Update interior cells using a Lax-Friedrichs scheme ---
+        #pragma omp target teams distribute parallel for collapse(2)
         for (int i = 1; i <= Nx; i++){
             for (int j = 1; j <= Ny; j++){
                 // If the cell is inside the solid obstacle, do not update it
@@ -215,6 +230,7 @@ int main(){
         }
 
         // Copy updated values back
+        #pragma omp target teams distribute parallel for collapse(2)
         for (int i = 1; i <= Nx; i++){
             for (int j = 1; j <= Ny; j++){
                 rho[i*(Ny+2)+j] = rho_new[i*(Ny+2)+j];
@@ -226,6 +242,7 @@ int main(){
 
         // Calculate total kinetic energy
         double total_kinetic = 0.0;
+        #pragma omp target teams distribute parallel for reduction(+:total_kinetic) collapse(2)
         for (int i = 1; i <= Nx; i++) {
             for (int j = 1; j <= Ny; j++) {
                 double u = rhou[i*(Ny+2)+j] / rho[i*(Ny+2)+j];
@@ -233,12 +250,11 @@ int main(){
                 total_kinetic += 0.5 * rho[i*(Ny+2)+j] * (u * u + v * v);
             }
         }
-
-        // Optional: output progress and write VTK file every 50 time steps
-        if (n % 50 == 0) {
-            cout << "Step " << n << " completed, total kinetic energy: " << total_kinetic << endl;
-        }
     }
+
+    auto end_timer = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration<double>(end_timer - begin_timer);
+    std::cout << "It took " << duration.count() << " seconds.\n";
 
     return 0;
 }
